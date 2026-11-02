@@ -1,40 +1,26 @@
 # ================= Stage 1: trainer =================
 FROM python:3.10-slim AS trainer
 WORKDIR /build
-
 RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 && rm -rf /var/lib/apt/lists/*
-
 COPY requirements-train.txt .
 RUN pip install --no-cache-dir -r requirements-train.txt
-
 COPY src/ ./src/
 COPY samples/ ./samples/
-
-# Навчання та створення артефактів
 RUN python -m src.train --classes yes no up down --epochs 3 --seed 42 --out /build/artifacts
-
 # ================= Stage 2: runtime =================
 FROM python:3.10-slim AS runtime
 WORKDIR /app
-
 RUN apt-get update && apt-get install -y --no-install-recommends libsndfile1 && rm -rf /var/lib/apt/lists/*
-
 COPY requirements-api.txt .
 RUN pip install --no-cache-dir -r requirements-api.txt
-
 COPY src/ ./src/
-# Забираємо ТІЛЬКИ згенеровані артефакти
 COPY --from=trainer /build/artifacts ./artifacts
-
 ENV MODEL_PATH=/app/artifacts/model.pt \
     PORT=8000 \
     PYTHONUNBUFFERED=1
-
 RUN useradd --create-home appuser
 USER appuser
-
 EXPOSE 8000
-
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
 
