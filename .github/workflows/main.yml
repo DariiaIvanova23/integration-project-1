@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Lint
+        run: |
+          pip install ruff
+          ruff check src/ || true
+
+      - name: Build Docker Image
+        run: |
+          docker build -t kws-api:${{ github.sha }} .
+
+      - name: Run container & Health check
+        run: |
+          docker run -d --name kws -p 8000:8000 kws-api:${{ github.sha }}
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health; then
+              echo "Server is healthy!"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Smoke test & Quality Gate
+        run: |
+          curl -fail -X POST -F "file=@samples/yes.wav" http://localhost:8000/predict
+          ACC=$(curl -s http://localhost:8000/model-info | python -c "import sys, json; print(json.load(sys.stdin).get('accuracy', 0))")
+          echo "Model Accuracy: $ACC%"
+          python -c "import sys; sys.exit(0 if float($ACC) >= 50.0 else 1)"
+
+      - name: Logs on failure
+        if: failure()
+        run: docker logs kws
