@@ -1,0 +1,142 @@
+name: ml-pipeline
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      epochs:
+        description: "Кількість епох навчання"
+        default: "3"
+      push_image:
+        description: "Опублікувати образ у GHCR"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  EPOCHS: ${{ inputs.epochs || (github.event_name == 'pull_request' && '2' || '3') }}
+  MIN_ACCURACY: ${{ github.event_name == 'pull_request' && '50' || '60' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint code
+        run: |
+          pip install ruff
+          ruff check src/ scripts/ || true
+
+  train:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build trainer image
+        run: docker build --target trainer -t kws-trainer:ci .
+
+      - name: Train model in container
+        run: |
+          mkdir -p artifacts
+          docker run --rm -v "$PWD/artifacts:/artifacts" kws-trainer:ci \
+            --classes yes no up down --epochs "$EPOCHS" --seed 42 --out /artifacts 2>&1 | tee artifacts/train.log
+
+      - name: Upload model artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model
+          path: artifacts/
+          retention-days: 7
+
+  verify:
+    needs: train
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: artifacts/
+
+      - name: Build runtime image
+        run: docker build --target runtime -t kws-api:ci .
+
+      - name: Start service & Healthcheck
+        run: |
+          docker run -d --name kws -p 8000:8000 kws-api:ci
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/health && break
+            sleep 2
+          done
+
+      - name: Evaluate Golden Samples & Latency
+        run: |
+          mkdir -p metrics
+          pip install requests numpy
+          python scripts/verify_model.py --url http://localhost:8000 --expected samples/expected.json --out metrics/verify.json
+          python scripts/benchmark.py --url http://localhost:8000 --n 50 --warmup 5 --out metrics/latency.json
+
+      - name: Generate Summary Report
+        if: always()
+        run: |
+          python scripts/make_report.py --metrics metrics/ --out metrics/report.md
+          cat metrics/report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: metrics/
+
+  build-push:
+    needs: verify
+    if: github.event_name == 'push' || inputs.push_image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model
+          path: artifacts/
+
+      - name: Login to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/kws-api
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and Push Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

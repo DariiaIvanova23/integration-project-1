@@ -1,32 +1,50 @@
+import argparse
+import json
 import time
 import requests
 import numpy as np
 
-URL = "http://localhost:8000/predict"
-FILE_PATH = "samples/yes.wav"
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default="http://localhost:8000")
+    parser.add_argument("--n", type=int, default=100)
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--out", default="metrics/latency.json")
+    args = parser.parse_args()
 
-def run_benchmark():
-    server_latencies = []
-    client_latencies = []
+    file_path = "samples/yes.wav"
 
-    print("Виконуємо 10 розігрівних запитів...")
-    for _ in range(10):
-        with open(FILE_PATH, "rb") as f:
-            requests.post(URL, files={"file": ("yes.wav", f, "audio/wav")})
+    for _ in range(args.warmup):
+        with open(file_path, "rb") as f:
+            requests.post(f"{args.url}/predict", files={"file": ("yes.wav", f, "audio/wav")})
 
-    print("Виконуємо 100 тестових запитів...")
-    for _ in range(100):
+    server_latencies, client_latencies = [], []
+
+    for _ in range(args.n):
         t0 = time.perf_counter()
-        with open(FILE_PATH, "rb") as f:
-            resp = requests.post(URL, files={"file": ("yes.wav", f, "audio/wav")})
+        with open(file_path, "rb") as f:
+            resp = requests.post(f"{args.url}/predict", files={"file": ("yes.wav", f, "audio/wav")})
         t1 = time.perf_counter()
 
         client_latencies.append((t1 - t0) * 1000)
         server_latencies.append(resp.json()["latency_ms"])
 
-    print("\n--- РЕЗУЛЬТАТИ БЕНЧМАРКУ (мс) ---")
-    print(f"Сервер (Inference): Mean={np.mean(server_latencies):.2f} | p50={np.percentile(server_latencies, 50):.2f} | p95={np.percentile(server_latencies, 95):.2f}")
-    print(f"Клієнт (End-to-End): Mean={np.mean(client_latencies):.2f} | p50={np.percentile(client_latencies, 50):.2f} | p95={np.percentile(client_latencies, 95):.2f}")
+    result = {
+        "server_ms": {
+            "mean": round(float(np.mean(server_latencies)), 2),
+            "p50": round(float(np.percentile(server_latencies, 50)), 2),
+            "p95": round(float(np.percentile(server_latencies, 95)), 2)
+        },
+        "client_ms": {
+            "mean": round(float(np.mean(client_latencies)), 2),
+            "p50": round(float(np.percentile(client_latencies, 50)), 2),
+            "p95": round(float(np.percentile(client_latencies, 95)), 2)
+        }
+    }
+
+    with open(args.out, "w") as f:
+        json.dump(result, f, indent=2)
+    print("Бенчмарк завершено. Результати записано в:", args.out)
 
 if __name__ == "__main__":
-    run_benchmark()
+    main()
